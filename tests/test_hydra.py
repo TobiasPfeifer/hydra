@@ -3,7 +3,7 @@ import copy
 import torch
 from torch.utils.benchmark import Timer
 
-from hydra_mixer.hydra.modules import Hydra
+from hydra.modules import Hydra
 
 
 def maxdiff(a, b):
