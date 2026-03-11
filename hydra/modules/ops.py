@@ -137,11 +137,13 @@ class HydraSplitConv1dScanCombinedFn(torch.autograd.Function):
 
         y = torch.roll(scan, shifts=1, dims=1)
         y[:, 0, :] = 0.0
-        y = chunk_flip_join(y, dim=0, op="sum") + (D * x_og)
+        y_bidir = chunk_flip_join(y, dim=0, op="sum")
+        d_skip = D * x_og
 
-        # RMSNorm and gate
+        # Gated RMSNorm on scan output only (d_skip added after to avoid
+        # z-gate backward amplification from quadratic outliers)
         u, _, rstd = _layer_norm_fwd(
-            x=rearrange(y, "b s d -> (b s) d"),
+            x=rearrange(y_bidir, "b s d -> (b s) d"),
             z=rearrange(z, "b s d -> (b s) d"),
             weight=rmsnorm_weight,
             bias=None,
@@ -150,7 +152,7 @@ class HydraSplitConv1dScanCombinedFn(torch.autograd.Function):
             norm_before_gate=True,
             is_rms_norm=True,
         )
-        u = rearrange(u, "(b s) d -> b s d", b=batch)
+        u = rearrange(u, "(b s) d -> b s d", b=batch) + d_skip
 
         # Out projection
         ctx.outproj_weight_dtype = outproj_weight.dtype
@@ -226,14 +228,19 @@ class HydraSplitConv1dScanCombinedFn(torch.autograd.Function):
 
         y = torch.roll(scan, shifts=1, dims=1)
         y[:, 0, :] = 0.0
-        y = chunk_flip_join(y, dim=0, op="sum") + (D * x_og)
+        y_bidir = chunk_flip_join(y, dim=0, op="sum")
 
         # Compute gradients
         du = F.linear(dout, outproj_weight.T)
 
-        dy, drmsnorm_weight, _, dz, u = _layer_norm_bwd(
+        # du flows to both the gated-norm output and d_skip
+        # d_skip gradient: du directly
+        du_dskip = du
+        # gated-norm backward: du also (since u = norm_out + d_skip, grad splits additively)
+
+        dy_bidir, drmsnorm_weight, _, dz, norm_out = _layer_norm_bwd(
             dy=rearrange(du, "b s d -> (b s) d"),
-            x=rearrange(y, "b s d -> (b s) d"),
+            x=rearrange(y_bidir, "b s d -> (b s) d"),
             z=rearrange(z, "b s d -> (b s) d"),
             weight=rmsnorm_weight,
             bias=None,
@@ -245,17 +252,24 @@ class HydraSplitConv1dScanCombinedFn(torch.autograd.Function):
             recompute_output=True,
         )
         batch = dout.shape[0]
-        dy = rearrange(dy, "(b s) d -> b s d", b=batch)
+        dy_bidir = rearrange(dy_bidir, "(b s) d -> b s d", b=batch)
         dz = rearrange(dz, "(b s) d -> b s d", b=batch)
-        u = rearrange(u, "(b s) d -> b s d", b=batch)
+        norm_out = rearrange(norm_out, "(b s) d -> b s d", b=batch)
 
+        # u = norm_out + d_skip for out_proj weight gradient
+        u = norm_out + D * x_og
         doutproj_weight = einsum(dout, u, "b s o, b s d -> o d")
         doutproj_bias = None if (outproj_bias is None) else einsum(dout, "b s d -> d")
 
+        # d_skip = D * x_og, gradients w.r.t. D_weight, D_bias, x_og
+        dy = du_dskip
         dy_x_og = rearrange(dy * x_og, "b s (h p) -> b s h p", p=ctx.headdim)
         dD_weight = einsum(dy_x_og, x_og, "b s h p, b s d -> h d")
         dD_bias = einsum(dy_x_og, "b s h p -> h")
         dx_og = (D * dy) + einsum(dy_x_og, D_weight, "b s h p, h d -> b s d")
+
+        # Rename for scan backward
+        dy = dy_bidir
 
         dy = torch.cat([dy, flip(dy)], dim=0)
         dy[:, 0, :] = 0.0

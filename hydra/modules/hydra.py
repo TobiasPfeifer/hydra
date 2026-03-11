@@ -15,7 +15,7 @@ except ImportError:
 
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 
-from hydra.modules.ops import hydra_split_conv1d_scan_combined
+from .ops import hydra_split_conv1d_scan_combined
 
 
 class Hydra(nn.Module):
@@ -197,12 +197,16 @@ class Hydra(nn.Module):
         y = torch.roll(y, shifts=1, dims=1)
         y[:, 0, :] = 0.0
         y_fw, y_bw = y[:batch], torch.flip(y[batch:], (1,))
-        y = y_fw + y_bw + x_og * repeat(
+        y_bidir = y_fw + y_bw
+        d_skip = x_og * repeat(
             F.linear(x_og, self.fc_D.weight, bias=self.D), "b l h -> b l (h p)", p=self.headdim
         )
 
-        # Multiply "gate" branch and apply extra normalization layer
-        y = self.norm(y, z)
+        # Gated norm on scan output only (d_skip added after to avoid
+        # quadratic outliers inflating the normalized values and amplifying
+        # the z-gate backward gradient)
+        y = self.norm(y_bidir, z)
+        y = y + d_skip
         out = self.out_proj(y)
 
         return out
