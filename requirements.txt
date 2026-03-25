@@ -4,5 +4,5 @@ mosaicml[nlp,wandb]>=0.14.0
 mosaicml-streaming==0.4.1
 omegaconf>=2.2.3
 transformers>=4.28.1
-https://github.com/state-spaces/mamba/releases/download/v2.3.1/mamba_ssm-2.3.1+cu12torch2.8cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
+mamba-ssm==2.3.1
 causal-conv1d>=1.2.0
